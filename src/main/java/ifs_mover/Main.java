@@ -5,30 +5,40 @@
 * 3 of the License.  See LICENSE for details
 *
 * 본 프로그램 및 관련 소스코드, 문서 등 모든 자료는 있는 그대로 제공이 됩니다.
-* ifsmover 프로젝트의 개발자 및 개발사는 이 프로그램을 사용한 결과에 따른 어떠한 책임도 지지 않습니다.
-* ifsmover 개발팀은 사전 공지, 허락, 동의 없이 ifsmover 개발에 관련된 모든 결과물에 대한 LICENSE 방식을 변경 할 권리가 있습니다.
+* KSAN 프로젝트의 개발자 및 개발사는 이 프로그램을 사용한 결과에 따른 어떠한 책임도 지지 않습니다.
+* KSAN 개발팀은 사전 공지, 허락, 동의 없이 KSAN 개발에 관련된 모든 결과물에 대한 LICENSE 방식을 변경 할 권리가 있습니다.
 */
 
 package ifs_mover;
 
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.RuntimeMXBean;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 
+import com.amazonaws.services.s3.internal.SkipMd5CheckStrategy;
+import com.google.common.base.Strings;
+
+import ifs_mover.db.MariaDB;
+import ifs_mover.repository.Repository;
+
 public class Main {
+	private final static String VERSION = "0.3.0";
+
 	private static final Logger logger = LoggerFactory.getLogger(Main.class);
-	public static final String NAS = "nas";
+	private static final String JOBID_PATH = "./.jobId";
 	private static final int THREAD_COUNT = 5;
 	
-	private static final long UNIT_G = (1024 * 1024 * 1024);
-	private static final long UNIT_M = (1024 * 1024);
-	private static final long UNIT_K = 1024;
+	private static final long UNIT_G = (1000 * 1000 * 1000);
+	private static final long UNIT_M = (1000 * 1000);
+	private static final long UNIT_K = 1000;
 	
 	private static final int STATE_INIT = 0;
 	private static final int STATE_MOVE = 1;
@@ -48,6 +58,7 @@ public class Main {
 	private static final String MOVED = "Moved";
 	private static final String FAILED = "Failed";
 	private static final String SKIPPED = "Skipped";
+	private static final String DELETED = "Deleted";
 	private static final String FORMAT_START = "%-5s\t%-15s%22s";
 	private static final String FORMAT_START_END = "%-5s\t%-15s%22s - %s";
 	private static final String FORMAT_G = "%-10s : %,14d/ %,10.2fG";
@@ -56,6 +67,12 @@ public class Main {
 	private static final String FORMAT_B = "%-10s : %,14d/ %,10dB";
 
 	public static void main(String[] args) {
+		if (args.length == 1) {
+			if (args[0].equals("-v")) {
+				System.out.println("ifs_mover version : " + VERSION);
+				System.exit(0);
+			}
+		}
 		
 		IMOptions options = new IMOptions(args);
 		options.handleOptions();
@@ -73,8 +90,17 @@ public class Main {
 		if (threadCount <= 0) {
 			threadCount = THREAD_COUNT;
 		}
+		String inventoryFileName = options.getInventoryFileName();
 		
-		DBManager.init();
+		MoverConfig config = MoverConfig.getInstance();
+		config.configure();
+		logger.info("db init ... pool size : {}", config.getDbPoolSize());
+		try {
+			Utils.getDBInstance().init(config.getDbHost(), config.getDbPort(), config.getDatabase(), config.getDbUser(), config.getDbPass(), config.getDbPoolSize());
+		} catch (Exception e) {
+			logger.error(e.getMessage());
+			System.exit(-1);
+		}
 		
 		switch (type) {
 		case CHECK:
@@ -82,11 +108,11 @@ public class Main {
 			ObjectMover checkObjectMover = new ObjectMover.Builder(jobId)
 				.sourceConfig(options.getSourceConfig())
 				.targetConfig(options.getTargetConfig())
+				.moverConfig(config)
 				.threadCount(threadCount)
-				.isNAS(NAS.compareToIgnoreCase(options.getType()) == 0)
-				.isSourceAWS(options.getSourceConfig().isAWS())
-				.isTargetAWS(options.getTargetConfig().isAWS())
+				.type(options.getType())
 				.isRerun(false)
+				// .inventoryFileName(inventoryFileName)
 				.build();
 			
 			checkObjectMover.check();
@@ -95,37 +121,38 @@ public class Main {
 			break;
 			
 		case MOVE:
-			DBManager.createJobTable();
-			DBManager.createJob(pid, options.getType(), options.getSourceConfig(), options.getTargetConfig());
-			jobId = DBManager.getJobId(pid);
-			DBManager.createMoveObjectTable(jobId);
-			DBManager.createMoveObjectTableIndex(jobId);
+			Utils.getDBInstance().createJob(pid, options.getType(), options.getSourceConfig(), options.getTargetConfig());
+			jobId = Utils.getDBInstance().getJobId(pid);
+
+			writeJobID(jobId, options.getSourceConfPath());
+			logger.info("create jobid table ...");
+			Utils.getDBInstance().createMoveObjectTable(jobId);
+			Utils.getDBInstance().createTargetObjectTable(jobId);
 			
 			MDC.put("logFileName", "ifs_mover." + jobId + ".log");
 			logger.info("IFS_MOVER({}) MOVE START", pid);
 			ObjectMover objectMover = new ObjectMover.Builder(jobId)
 					.sourceConfig(options.getSourceConfig())
 					.targetConfig(options.getTargetConfig())
+					.moverConfig(config)
 					.threadCount(threadCount)
-					.isNAS(NAS.compareToIgnoreCase(options.getType()) == 0)
-					.isSourceAWS(options.getSourceConfig().isAWS())
-					.isTargetAWS(options.getTargetConfig().isAWS())
+					.type(options.getType())
 					.isRerun(false)
+					// .inventoryFileName(inventoryFileName)
 					.build();
-
 			objectMover.init();
-			DBManager.updateJobState(jobId, type);
-			
-			objectMover.startVersion();
-			DBManager.updateJobState(jobId, IMOptions.WORK_TYPE.COMPLETE);
-			DBManager.updateJobEnd(jobId);
+			Utils.getDBInstance().updateJobState(jobId, type);
+			objectMover.moveObjects();
+			Utils.getDBInstance().updateJobState(jobId, IMOptions.WORK_TYPE.COMPLETE);
+			Utils.getDBInstance().updateJobEnd(jobId);
 			logger.info(IFS_MOVER_END, pid);
 			break;
 			
 		case STOP:
 			jobId = options.getStopId();
 			logger.info("IFS_MOVER({}) STOP", pid);
-			String pidOfJob = DBManager.getProcessId(jobId);
+
+			String pidOfJob = Utils.getDBInstance().getProcessId(jobId);
 			if (pidOfJob == null) {
 				System.out.println("Can't find pid with jobID : " + jobId);
 				logger.error("Can't find pid with jobID : {}", jobId);
@@ -136,20 +163,27 @@ public class Main {
 			try {
 				Process p = Runtime.getRuntime().exec("kill -9 " + pidOfJob);
 				p.waitFor();
-				DBManager.updateJobState(jobId, type);
+				Utils.getDBInstance().updateJobState(jobId, type);
 			} catch (InterruptedException | IOException e) {
 				logger.error("faild stop job : {} - {}", jobId, e.getMessage());
 			}
-			DBManager.updateJobEnd(jobId);
+			Utils.getDBInstance().updateJobEnd(jobId);
 			logger.info(IFS_MOVER_END, pid);
 			break;
 			
 		case REMOVE:
 			logger.info("IFS_MOVER({}) REMOVE", pid);
 			jobId = options.getRemoveId();
-			DBManager.dropMoveObjectTable(jobId);
-			DBManager.dropMoveObjectIndex(jobId);
-			DBManager.updateJobState(jobId, type);
+
+			if (Utils.getDBInstance().isExistMoveTable(config.getDatabase(), jobId)) {
+				Utils.getDBInstance().dropMoveObjectIndex(jobId);
+				Utils.getDBInstance().dropMoveObjectTable(jobId);
+			}
+			if (Utils.getDBInstance().isExistRerunTable(config.getDatabase(), jobId)) {
+				Utils.getDBInstance().dropRerunObjectIndex(jobId);
+				Utils.getDBInstance().dropRerunObjectTable(jobId);
+			}
+			Utils.getDBInstance().updateJobState(jobId, type);
 			logger.info(IFS_MOVER_END, pid);
 			break;
 			
@@ -158,16 +192,14 @@ public class Main {
 
 			MDC.put("logFileName", "ifs_mover." + jobId + ".log");
 			logger.info("IFS_MOVER({}) RERUN START", pid);
-			String job_type = DBManager.getJobType(jobId);
+			String job_type = Utils.getDBInstance().getJobType(jobId);
 			if (job_type == null) {
 				logger.error("check job_id({}}) : There is no job.", jobId);
 				logger.info("IFS_MOVER({}) RERUN END", pid);
 				System.exit(-1);
 			}
 
-			DBManager.updateJobState(jobId, IMOptions.WORK_TYPE.RERUN);
-			
-			String pidOfRunJob = DBManager.getProcessId(jobId);
+			String pidOfRunJob = Utils.getDBInstance().getProcessId(jobId);
 			
 			if (pidOfRunJob != null) {
 				try {
@@ -178,30 +210,56 @@ public class Main {
 				}
 			}
 
+			int job_state = Utils.getDBInstance().getJobState(jobId);
+
+			Utils.getDBInstance().updateJobState(jobId, IMOptions.WORK_TYPE.RERUN);
+			if (Utils.getDBInstance().isExistMoveTable(config.getDatabase(), jobId)) {
+				// job complete
+				if (job_state == 4) {
+					if (Utils.getDBInstance().isExistRerunTable(config.getDatabase(), jobId)) {
+						Utils.getDBInstance().dropMoveObjectIndex(jobId);
+						Utils.getDBInstance().dropMoveObjectTable(jobId);
+						Utils.getDBInstance().renameTable(jobId);
+					} 
+				} else {
+					if (Utils.getDBInstance().isExistRerunTable(config.getDatabase(), jobId)) {
+						Utils.getDBInstance().dropRerunObjectIndex(jobId);
+						Utils.getDBInstance().dropRerunObjectTable(jobId);
+					}
+				}
+				Utils.getDBInstance().createRerunObjectTable(jobId);
+			} else {
+				logger.error("check job_id({}) : There is no move table.", jobId);
+				System.exit(-1);
+			}
+
 			ObjectMover rerunObjectMover = new ObjectMover.Builder(jobId)
 					.sourceConfig(options.getSourceConfig())
 					.targetConfig(options.getTargetConfig())
+					.moverConfig(config)
 					.threadCount(threadCount)
-					.isNAS(NAS.compareToIgnoreCase(job_type) == 0)
-					.isSourceAWS(options.getSourceConfig().isAWS())
-					.isTargetAWS(options.getTargetConfig().isAWS())
+					.type(job_type)
 					.isRerun(true)
+					// .inventoryFileName(inventoryFileName)
 					.build();
-			DBManager.updateJobStart(jobId);
-			DBManager.setProcessId(jobId, pid);
-			DBManager.updateJobRerun(jobId);
-			DBManager.updateObjectsRerun(jobId);
+
+			Utils.getDBInstance().updateJobStart(jobId);
+			Utils.getDBInstance().setProcessId(jobId, pid);
+			Utils.getDBInstance().updateJobRerun(jobId);
+			// Utils.getDBInstance().updateObjectsRerun(jobId);
 
 			rerunObjectMover.init();
-			DBManager.updateJobState(jobId, IMOptions.WORK_TYPE.RERUN_MOVE);
-			rerunObjectMover.startVersion();
-			DBManager.updateJobState(jobId, IMOptions.WORK_TYPE.COMPLETE);
-			DBManager.updateJobEnd(jobId);
+			Utils.getDBInstance().updateJobState(jobId, IMOptions.WORK_TYPE.RERUN_MOVE);
+			rerunObjectMover.moveObjects();
+			Utils.getDBInstance().deleteRerunTableForDeletedObjects(jobId);
+			Utils.getDBInstance().updateJobState(jobId, IMOptions.WORK_TYPE.COMPLETE);
+			Utils.getDBInstance().updateJobEnd(jobId);
 			logger.info("IFS_MOVER({}) RERUN END", pid);
 			break;
 			
 		case STATUS:
-			status();
+			status(options.getJobId(), options.getSrcBucketName(), options.getDstBucketName());
+			
 			logger.info("IFS_MOVER({}) STATUS", pid);
 			break;
 
@@ -210,7 +268,7 @@ public class Main {
 		}
 	}
 
-	private static void status() {
+	private static void status(String markedJobId, String srcBucketName, String dstBucketName) {
 		String jobId;
 		int jobState;
 		String jobType;
@@ -224,6 +282,8 @@ public class Main {
 		long failedSize;
 		long skipObjectsCount;
 		long skipObjectsSize;
+		long deleteObjectCount;
+		long deleteObjectSize;
 		String startTime;
 		String endTime;
 		String errorDesc;
@@ -232,32 +292,46 @@ public class Main {
 		double unitMove = 0.0;
 		double unitFailed = 0.0;
 		double unitSkip = 0.0;
+		double unitDelete = 0.0;
 		double percent = 0.0;
 	
-		List<Map<String, String>> list = DBManager.status();
+		List<HashMap<String, Object>> list;
+		if (!Strings.isNullOrEmpty(markedJobId)) {
+			list = Utils.getDBInstance().status(markedJobId);
+		} else if (!Strings.isNullOrEmpty(srcBucketName) && !Strings.isNullOrEmpty(dstBucketName)) {
+			list = Utils.getDBInstance().status(srcBucketName, dstBucketName);
+		} else if (!Strings.isNullOrEmpty(srcBucketName)) {
+			list = Utils.getDBInstance().statusSrcBucket(srcBucketName);
+		} else if (!Strings.isNullOrEmpty(dstBucketName)) {
+			list = Utils.getDBInstance().statusDstBucket(dstBucketName);
+		} else {
+			list = Utils.getDBInstance().status();
+		}
 	
-		if (list.isEmpty()) {
+		if (list == null) {
 			System.out.println("No jobs were created.");
 			return;
 		}
 	
-		for (Map<String, String> info : list) {
-			jobId = info.get("jobId");
-			jobState = Integer.parseInt(info.get("jobState"));
-			jobType = info.get("jobType");
-			sourcePoint = info.get("sourcePoint");
-			targetPoint = info.get("targetPoint");
-			objectsCount = Long.parseLong(info.get("objectsCount"));
-			objectsSize = Long.parseLong(info.get("objectsSize"));
-			movedObjectsCount = Long.parseLong(info.get("movedObjectsCount"));
-			movedObjectsSize = Long.parseLong(info.get("movedObjectsSize"));
-			failedCount = Long.parseLong(info.get("failedCount"));
-			failedSize = Long.parseLong(info.get("failedSize"));
-			skipObjectsCount = Long.parseLong(info.get("skipObjectsCount"));
-			skipObjectsSize = Long.parseLong(info.get("skipObjectsSize"));
-			startTime = info.get("startTime");
-			endTime = info.get("endTime");
-			errorDesc = info.get("errorDesc");
+		for (HashMap<String, Object> info : list) {
+			jobId = String.valueOf((int) info.get(MariaDB.JOB_TABLE_COLUMN_JOB_ID));
+			jobState = (int) info.get(MariaDB.JOB_TABLE_COLUMN_JOB_STATE);
+			jobType = (String) info.get(MariaDB.JOB_TABLE_COLUMN_JOB_TYPE);
+			sourcePoint = (String) info.get(MariaDB.JOB_TABLE_COLUMN_SOURCE_POINT);
+			targetPoint = (String) info.get(MariaDB.JOB_TABLE_COLUMN_TARGET_POINT);
+			objectsCount = (long) info.get(MariaDB.JOB_TABLE_COLUMN_OBJECTS_COUNT);
+			objectsSize = (long) info.get(MariaDB.JOB_TABLE_COLUMN_OBJECTS_SIZE);
+			movedObjectsCount = (long) info.get(MariaDB.JOB_TABLE_COLUMN_MOVED_OBJECTS_COUNT);
+			movedObjectsSize = (long) info.get(MariaDB.JOB_TABLE_COLUMN_MOVED_OBJECTS_SIZE);
+			failedCount = (long) info.get(MariaDB.JOB_TABLE_COLUMN_FAILED_COUNT);
+			failedSize = (long) info.get(MariaDB.JOB_TABLE_COLUMN_FAILED_SIZE);
+			skipObjectsCount = (long) info.get(MariaDB.JOB_TABLE_COLUMN_SKIP_OBJECTS_COUNT);
+			skipObjectsSize = (long) info.get(MariaDB.JOB_TABLE_COLUMN_SKIP_OBJECTS_SIZE);
+			deleteObjectCount = (long) info.get(MariaDB.JOB_TABLE_COLUMN_DELETE_OBJECT_COUNT);
+			deleteObjectSize = (long) info.get(MariaDB.JOB_TABLE_COLUMN_DELETE_OBJECT_SIZE);
+			startTime = (String) info.get(MariaDB.JOB_TABLE_COLUMN_START);
+			endTime = (String) info.get(MariaDB.JOB_TABLE_COLUMN_END);
+			errorDesc = (String) info.get(MariaDB.JOB_TABLE_COLUMN_ERROR_DESC);
 	
 			if (jobState == STATE_REMOVE) {
 				continue;
@@ -289,14 +363,14 @@ public class Main {
 				break;
 				
 			case STATE_ERROR:
-				System.out.println(JOB_IS + String.format(FORMAT_START_END, jobId, "ERROR", startTime, endTime));
+				System.out.println(JOB_IS + String.format(FORMAT_START, jobId, "ERROR", startTime));
 				break;
 				
 			default:
 				break;
 			}
 			
-			if (Main.NAS.compareToIgnoreCase(jobType) == 0) {
+			if (Repository.IFS_FILE.compareToIgnoreCase(jobType) == 0) {
 				System.out.println("File : " + String.format("%s -> Object : %s", sourcePoint, targetPoint));
 			} else {
 				System.out.println("Object : " + String.format("%s -> Object : %s", sourcePoint, targetPoint));
@@ -304,6 +378,7 @@ public class Main {
 			
 			if (jobState == STATE_ERROR) {
 				System.out.println("Error : " + errorDesc);
+				System.out.println();
 				continue;
 			}
 	
@@ -387,7 +462,7 @@ public class Main {
 				if (objectsCount == 0) {
 					percent = 0.0;
 				} else {
-					percent = (((double)skipObjectsSize + (double)movedObjectsSize + (double)failedSize) / (double) objectsSize) * 100;
+					percent = (((double)skipObjectsSize + (double)movedObjectsSize + failedSize) / objectsSize) * 100;
 				}
 				
 				unitSize = (double)objectsSize / UNIT_G;
@@ -479,9 +554,49 @@ public class Main {
 				} else {
 					System.out.println(String.format(FORMAT_B, FAILED, failedCount, failedSize));
 				}
+
+				if (deleteObjectCount > 0) {
+					unitDelete = (double)deleteObjectSize / UNIT_G;
+					if (unitDelete > 1.0) {
+						System.out.println(String.format(FORMAT_G, DELETED, deleteObjectCount, unitDelete));
+					} else {
+						unitDelete = (double)deleteObjectSize / UNIT_M;
+						if (unitDelete > 1.0) {
+							System.out.println(String.format(FORMAT_M, DELETED, deleteObjectCount, unitDelete));
+						} else {
+							unitDelete = (double)deleteObjectSize / UNIT_K;
+							if (unitDelete > 1.0) {
+								System.out.println(String.format(FORMAT_K, DELETED, deleteObjectCount, unitDelete));
+							} else {
+								System.out.println(String.format(FORMAT_B, DELETED, deleteObjectCount, deleteObjectSize));
+							}
+						}
+					}
+				}
 			} 
 			System.out.println();
 		}
+	}
+
+	private static void writeJobID(String jobID, String path) {
+		if (path.length() < 20) {
+			return;
+		}
+
+		String uuid = path.substring(7);
+		File file = new File(JOBID_PATH + uuid);
+        try {
+            if (!file.exists()) {
+                file.createNewFile();
+            }
+            FileWriter fw = new FileWriter(file);
+            fw.write(jobID);
+            fw.flush();
+            fw.close();
+        } catch (IOException e) {
+            logger.error(e.getMessage());
+            System.exit(-1);
+        }
 	}
 }
 
