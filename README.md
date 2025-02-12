@@ -525,6 +525,7 @@ set_targfet_path_to_lowercase=1 // change target name to lowercase
 * OS : CentOS Linux release 7.5 이상
 * JDK : 1.8 이상
 * Python : 2.0 이상
+* mariadb : 10.5.21 이상
 
 ## How to Get Started
 <kbd>git clone https://github.com/infinistor/ifsmover.git</kbd>
