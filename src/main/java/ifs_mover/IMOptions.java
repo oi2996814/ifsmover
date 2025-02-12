@@ -5,8 +5,8 @@
 * 3 of the License.  See LICENSE for details
 *
 * 본 프로그램 및 관련 소스코드, 문서 등 모든 자료는 있는 그대로 제공이 됩니다.
-* ifsmover 프로젝트의 개발자 및 개발사는 이 프로그램을 사용한 결과에 따른 어떠한 책임도 지지 않습니다.
-* ifsmover 개발팀은 사전 공지, 허락, 동의 없이 ifsmover 개발에 관련된 모든 결과물에 대한 LICENSE 방식을 변경 할 권리가 있습니다.
+* KSAN 프로젝트의 개발자 및 개발사는 이 프로그램을 사용한 결과에 따른 어떠한 책임도 지지 않습니다.
+* KSAN 개발팀은 사전 공지, 허락, 동의 없이 KSAN 개발에 관련된 모든 결과물에 대한 LICENSE 방식을 변경 할 권리가 있습니다.
 */
 
 package ifs_mover;
@@ -44,6 +44,10 @@ public class IMOptions {
 	private boolean isRemoveId;
 	private boolean isRerunId;
 	private boolean isStatus;
+	private boolean isJobId;
+	private boolean isSrcBucketName;
+	private boolean isDstBucketName;
+	private boolean isInventoryFile;
 	
 	private String type;
 	private String sourceConfPath;
@@ -53,9 +57,14 @@ public class IMOptions {
 	private String removeId;
 	private String rerunId;
 	private int threadCount;
+	private String jobId;
+	private String srcBucketName;
+	private String dstBucketName;
+	private String inventoryFileName;
 	
-	private final String NAS = "nas";
+	private final String FILE = "file";
 	private final String S3 = "s3";
+	private final String OS = "swift";
 	private final String EA = "ea";
 	private final String PERM = "perm";
 	private final String TIME = "time";
@@ -122,6 +131,10 @@ public class IMOptions {
 		Option rerun = Option.builder(null).longOpt("rerun").hasArg(true).required(false).build();
 		Option check = Option.builder(null).longOpt("check").hasArg(false).required(false).build();
 		Option status = Option.builder(null).longOpt("status").hasArg(false).required(false).build();
+		Option jobid = Option.builder(null).longOpt("jobid").hasArg(true).required(false).build();
+		Option srcbucket = Option.builder(null).longOpt("srcbucket").hasArg(true).required(false).build();
+		Option dstbucket = Option.builder(null).longOpt("dstbucket").hasArg(true).required(false).build();
+		Option inventory = Option.builder("f").longOpt("inventory").hasArg(true).required(false).build();
 		
 		options.addOption(help);
 		options.addOption(type);
@@ -134,6 +147,10 @@ public class IMOptions {
 		options.addOption(rerun);
 		options.addOption(check);
 		options.addOption(status);
+		options.addOption(jobid);
+		options.addOption(srcbucket);
+		options.addOption(dstbucket);
+		options.addOption(inventory);
 	}
 	
 	private void parseOptions() {
@@ -149,9 +166,11 @@ public class IMOptions {
 		isType = line.hasOption("t");
 		if (isType) {
 			type = line.getOptionValue("t");
-			if (NAS.compareToIgnoreCase(type) != 0) {
+			if (FILE.compareToIgnoreCase(type) != 0) {
 				if (S3.compareToIgnoreCase(type) != 0) {
-					printUsage();
+					if (OS.compareToIgnoreCase(type) != 0) {
+						printUsage();
+					}
 				}
 			}
 		}
@@ -187,18 +206,26 @@ public class IMOptions {
 		}
 		
 		isOption = line.hasOption("o");
-		if (isOption) option = line.getOptionValue("o");
+		if (isOption) {
+			option = line.getOptionValue("o");
+		}
 		
 		isCheck = line.hasOption("check");
 		
 		isStopId = line.hasOption("jobstop");
-		if (isStopId) stopId = line.getOptionValue("jobstop");
+		if (isStopId) {
+			stopId = line.getOptionValue("jobstop");
+		}
 		
 		isRemoveId = line.hasOption("jobremove");
-		if (isRemoveId) removeId = line.getOptionValue("jobremove");
+		if (isRemoveId) {
+			removeId = line.getOptionValue("jobremove");
+		}
 		
 		isRerunId = line.hasOption("rerun");
-		if (isRerunId) rerunId = line.getOptionValue("rerun");
+		if (isRerunId) {
+			rerunId = line.getOptionValue("rerun");
+		}
 		
 		isStatus = line.hasOption("status");
 		
@@ -232,6 +259,26 @@ public class IMOptions {
 		} else {
 			printUsage();
 		}
+
+		isJobId = line.hasOption("jobid");
+		if (isJobId) {
+			jobId = line.getOptionValue("jobid");
+		}
+
+		isSrcBucketName = line.hasOption("srcbucket");
+		if (isSrcBucketName) {
+			srcBucketName = line.getOptionValue("srcbucket");
+		}
+		
+		isDstBucketName = line.hasOption("dstbucket");
+		if (isDstBucketName) {
+			dstBucketName = line.getOptionValue("dstbucket");
+		}
+
+		isInventoryFile = line.hasOption("f");
+		if (isInventoryFile) {
+			inventoryFileName = line.getOptionValue("f");
+		}
 	}
 	
 	private void printUsage() {
@@ -239,15 +286,16 @@ public class IMOptions {
 		
 		System.out.println("Usage : ifs_mover [OPTION] ...");
 		System.out.println("Move Objects");
-		System.out.println("\t" + String.format("%-20s\t%s", "-t=nas|s3","source type, NAS or S3"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-t=file|s3|swift","source type, File(NAS etc) or S3 or Swift"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-source=source.conf", "source configuration file path"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-target=target.conf", "target configuration file path"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-o=ea,perm,time", "object meta info"));
 		System.out.println("\t\t" + String.format("%-8s\t %s", "ea", "save fils's extented attribute in S3 meta"));
 		System.out.println("\t\t" + String.format("%-8s\t %s", "perm", "save file's permission(rwxrwxrwx) in S3 meta"));
 		System.out.println("\t\t" + String.format("%-8s\t %s", "", "744, READ permission granted to AUTHENTICATED_USER and PUBLIC"));
-		System.out.println("\t\t" + String.format("%-8s %s", "time", "save file's C/M/A time in S3 meta"));
+		System.out.println("\t\t" + String.format("%-8s\t %s", "time", "save file's C/M/A time in S3 meta"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-thread=", "thread count"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-f=file", "inventory file path"));
 		
 		System.out.println("Stop Job");
 		System.out.println("\t" + String.format("%-20s\t%s", "-jobstop=jobid", "stop a job in progress"));
@@ -262,15 +310,19 @@ public class IMOptions {
 		System.out.println("\t" + String.format("%-20s\t%s", "-source=source.conf", "source configuration file path"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-target=target.conf", "target configuration file path"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-thread=", "thread count"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-f=file", "inventory file path"));
 		
 		System.out.println("Check");
 		System.out.println("\t" + String.format("%-20s\t%s", "-check", "check source and target configuration"));
-		System.out.println("\t" + String.format("%-20s\t%s", "-t=nas|s3","source type, NAS or S3"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-t=file|s3|swift","source type, FILE(NAS) or S3 or SWIFT"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-source=source.conf", "source configuration file path"));
 		System.out.println("\t" + String.format("%-20s\t%s", "-target=target.conf", "target configuration file path"));
 		
 		System.out.println("Status Job");
-		System.out.println("\t" + String.format("%-20s\t%s", "-status", "show job progress"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-status", "show all jobs progress"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-jobid=jobid", "show job progress for jobid"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-srcbucket=bucket", "show job progress for srcbucket"));
+		System.out.println("\t" + String.format("%-20s\t%s", "-dstbucket=bucket", "show job progress for dstbucket"));
 		
 		System.out.println("source.conf");
 		System.out.println("\t" + String.format("%-20s\t%s", "mountpoint", "information mounted on the server to be performed"));
@@ -280,12 +332,25 @@ public class IMOptions {
 		System.out.println("\t" + String.format("%-20s\t%s", "secret", "Secret Access Key"));
 		System.out.println("\t" + String.format("%-20s\t%s", "bucket", "bucket name"));
 		System.out.println("\t" + String.format("%-20s\t%s", "prefix", "PREFIX DIR name from which to start the MOVE"));
+		System.out.println("\t" + String.format("%-20s\t%s", "move_size", "The size of the file that you can move at once."));
+		System.out.println("\t" + String.format("%-20s\t%s", "user_name", "user name for swift"));
+		System.out.println("\t" + String.format("%-20s\t%s", "api_key", "api key for swift"));
+		System.out.println("\t" + String.format("%-20s\t%s", "auth_endpoint", "http://ip:port/v3, authentication endpoint for swift"));
+		System.out.println("\t" + String.format("%-20s\t%s", "domain_id", "domain id for swift"));
+		System.out.println("\t" + String.format("%-20s\t%s", "domain_name", "domain name for swift"));
+		System.out.println("\t" + String.format("%-20s\t%s", "project_id", "project id for swift"));
+		System.out.println("\t" + String.format("%-20s\t%s", "project_name", "project name for swift"));
+		System.out.println("\t" + String.format("%-20s\t%s", "container", "list of containers(If it is empty, it means all container)"));
+
 		System.out.println("target.conf");
 		System.out.println("\t" + String.format("%-20s\t%s", "endpoint", "http://ip:port"));
 		System.out.println("\t" + String.format("%-20s\t%s", "access", "Access Key ID"));
 		System.out.println("\t" + String.format("%-20s\t%s", "secret", "Secret Access Key"));
 		System.out.println("\t" + String.format("%-20s\t%s", "bucket", "bucket name"));
 		System.out.println("\t" + String.format("%-20s\t%s", "prefix", "PREFIX DIR name from which to start the MOVED"));
+		System.out.println("\t" + String.format("%-20s\t%s", "versioning", "bucket versioning on, off"));
+		System.out.println("\t" + String.format("%-20s\t%s", "sync", "target object sync on, off"));
+		System.out.println("\t" + String.format("%-20s\t%s", "sync_mode", "target object sync mode, [etag|size|exist]"));
 		
 		System.exit(-1);
 	}
@@ -430,5 +495,25 @@ public class IMOptions {
 
 	public String getRerunId() {
 		return rerunId;
+	}
+
+	public String getSourceConfPath() {
+		return sourceConfPath;
+	}
+
+	public String getJobId() {
+		return jobId;
+	}
+	
+	public String getSrcBucketName() {
+		return srcBucketName;
+	}
+
+	public String getDstBucketName() {
+		return dstBucketName;
+	}
+
+	public String getInventoryFileName() {
+		return inventoryFileName;
 	}
 }
